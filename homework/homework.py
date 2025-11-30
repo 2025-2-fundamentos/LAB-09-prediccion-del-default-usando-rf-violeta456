@@ -92,3 +92,150 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+
+
+import json
+import gzip
+import pickle
+import os
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (
+    precision_score,
+    balanced_accuracy_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+)
+
+def cargar_csv(ruta):
+    return pd.read_csv(ruta, compression="zip")
+
+def limpiar_dataset(df):
+    df = df.rename(columns={"default payment next month": "default"})
+    df = df.drop(columns=["ID"], errors="ignore")
+    df = df.dropna()
+    df["EDUCATION"] = df["EDUCATION"].apply(lambda x: x if x in [0, 1, 2, 3, 4] else 4)
+
+    return df
+
+def separar_xy(df):
+    return df.drop(columns=["default"]), df["default"]
+
+
+def crear_pipeline():
+    categ = ["SEX", "EDUCATION", "MARRIAGE"]
+
+    encoder = ColumnTransformer(
+        transformers=[("cat_encoder", OneHotEncoder(handle_unknown="ignore"), categ)],
+        remainder="passthrough"
+    )
+
+    flujo = Pipeline([
+        ("prep", encoder),
+        ("rf", RandomForestClassifier(random_state=42))
+    ])
+
+    return flujo
+
+def ajustar_hiperparametros(paso, Xtr, Ytr):
+    grid = {
+        "rf__n_estimators": [50, 100, 200],
+        "rf__max_depth": [None, 5, 10, 20],
+        "rf__min_samples_split": [2, 5, 10],
+        "rf__min_samples_leaf": [1, 2, 4],
+    }
+
+    buscador = GridSearchCV(
+        paso,
+        grid,
+        cv=10,
+        scoring="balanced_accuracy",
+        n_jobs=-1,
+        verbose=1
+    )
+
+    buscador.fit(Xtr, Ytr)
+    return buscador
+
+
+def guardar_modelo(modelo, ruta):
+    carpeta = os.path.dirname(ruta)
+    os.makedirs(carpeta, exist_ok=True)
+    with gzip.open(ruta, "wb") as f:
+        pickle.dump(modelo, f)
+
+
+def evaluar_metricas(y_real, y_hat, nombre):
+    return {
+        "type": "metrics",
+        "dataset": nombre,
+        "precision": precision_score(y_real, y_hat, zero_division=0),
+        "balanced_accuracy": balanced_accuracy_score(y_real, y_hat),
+        "recall": recall_score(y_real, y_hat, zero_division=0),
+        "f1_score": f1_score(y_real, y_hat, zero_division=0),
+    }
+
+
+def matriz_confusion_dict(y_real, y_hat, nombre):
+    cm = confusion_matrix(y_real, y_hat)
+    return {
+        "type": "cm_matrix",
+        "dataset": nombre,
+        "true_0": {"predicted_0": int(cm[0][0]), "predicted_1": int(cm[0][1])},
+        "true_1": {"predicted_0": int(cm[1][0]), "predicted_1": int(cm[1][1])},
+    }
+
+def escribir_json(lista, ruta):
+    os.makedirs(os.path.dirname(ruta), exist_ok=True)
+    with open(ruta, "w") as f:
+        for item in lista:
+            f.write(json.dumps(item) + "\n")
+
+
+def ejecutar():
+    ruta_train = "files/input/train_data.csv.zip"
+    ruta_test = "files/input/test_data.csv.zip"
+    ruta_modelo = "files/models/model.pkl.gz"
+    ruta_metricas = "files/output/metrics.json"
+
+    # Cargar
+    df_tr = cargar_csv(ruta_train)
+    df_te = cargar_csv(ruta_test)
+
+    # Preprocesar
+    df_tr = limpiar_dataset(df_tr)
+    df_te = limpiar_dataset(df_te)
+
+    Xtr, Ytr = separar_xy(df_tr)
+    Xte, Yte = separar_xy(df_te)
+
+    # Modelo
+    modelo = crear_pipeline()
+    modelo_opt = ajustar_hiperparametros(modelo, Xtr, Ytr)
+
+    # Guardar modelo
+    guardar_modelo(modelo_opt, ruta_modelo)
+
+    # Predicciones
+    pred_tr = modelo_opt.predict(Xtr)
+    pred_te = modelo_opt.predict(Xte)
+
+    # Métricas
+    met_tr = evaluar_metricas(Ytr, pred_tr, "train")
+    met_te = evaluar_metricas(Yte, pred_te, "test")
+
+    cm_tr = matriz_confusion_dict(Ytr, pred_tr, "train")
+    cm_te = matriz_confusion_dict(Yte, pred_te, "test")
+
+    # Guardar a archivo
+    escribir_json([met_tr, met_te, cm_tr, cm_te], ruta_metricas)
+
+
+if __name__ == "__main__":
+    ejecutar()
